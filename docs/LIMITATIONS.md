@@ -8,7 +8,7 @@ AWS is simulated locally with Floci on Docker. Everything here is written from w
 | Database | A plain Postgres container stands in for RDS | simpler, same SQL | RDS in private subnets, Multi-AZ, automated backups, encryption at rest |
 | Storage | Floci runs with `FLOCI_STORAGE_MODE=memory`: data is lost when it restarts | keeps local runs clean | run `python scripts/dev.py init` again (idempotent); persistent mode if needed |
 | Daily jobs | EventBridge schedule -> HTTP call may not be supported (to confirm); a fallback cron container (`infra/scheduler`) calls the jobs with a service token | scheduled HTTP targets are not verified in the emulator | EventBridge scheduled rule + API destination with OAuth client credentials (what `init.py` tries to create), CloudWatch alarm on failed invocations |
-| Cognito | MFA, groups claim and token lifetime behaviour: to confirm in the Cognito spike | emulator coverage unknown | real Cognito user pool with MFA required for managers, 15-minute access tokens |
+| Cognito | Groups claim, 15-minute access tokens, JWKS signature check and the client-credentials (service) client confirmed working on Floci (`docs/FLOCI_COGNITO_NOTES.md`); MFA: see the spike results below | emulator coverage of MFA unknown | real Cognito user pool with MFA required for managers, 15-minute access tokens |
 | CloudWatch | Alarms may be created but not fire (to confirm) | emulator coverage unknown | real alarms with SNS notification |
 | TLS | Self-signed certificate on nginx | local only | ACM certificate on CloudFront / load balancer |
 | Secrets | The SendGrid secret holds a placeholder locally, so e-mails are skipped | the real key must never be committed | add the real key by hand to Secrets Manager |
@@ -33,3 +33,14 @@ Real results from `python scripts/dev.py spike` (see `docs/FLOCI_SPIKE.md`).
 | EventBridge Scheduler | Fixed: `rate(1 days)` was rejected (AWS wants `rate(1 day)`); with the fix `create_schedule` is accepted. Scheduler targets are AWS APIs, not HTTP endpoints | AWS design | EventBridge rule + API destination (OAuth client credentials); locally the cron container |
 | Cognito MFA (TOTP) for managers | Only the pool-level TOTP setting is confirmed on Floci; enrolment, the sign-in challenge and rejecting a wrong code are not verified yet (`cognito_spike.js` checks them) | emulator coverage unknown; spike not run yet | MFA Required on the pool (Cognito cannot require it for one group), or a separate user pool for managers |
 | Cognito GlobalSignOut | Not verified yet on Floci. On any platform, services check JWTs offline, so a signed-out access token keeps working until it expires | JWTs are self-contained | keep the 15-minute access token; GlobalSignOut revokes the refresh token on AWS |
+
+### Service 1 (added with the kerolus/limitations-s1 branch)
+
+| Area | What differs from real AWS | Reason | Proposed improvement on real AWS |
+| --- | --- | --- | --- |
+| Cognito issuer | Tokens carry `iss = http://floci:4566/<pool>`, a name that only resolves inside Docker; checks from the host use `localhost:4566` | Floci uses its Docker host name | real issuer `https://cognito-idp.<region>.amazonaws.com/<pool>` reachable everywhere |
+| Floci restart (S1) | Floci starts empty, so the Cognito users and the secret `ett/db/s1` disappear; Service 1 then refuses to start (fail closed) until `put-db-secret.js` and `cognito_init.js` are run again | `FLOCI_STORAGE_MODE=memory` | managed Cognito and Secrets Manager keep their data; secret rotation instead of a script |
+| Database TLS | Services talk to the Postgres container without TLS locally (`DB_SSL=false`) | local Docker network only | RDS with `DB_SSL=true` (certificate verified), already supported by `services/common/db.js` |
+| IAM pattern (S1) | `infra/iam/s1-policy.json` allows `secret:ett/db*`, which also matches the admin secret `ett/db` | written before per-service secrets existed | narrow to `ett/db/s1*` (and the same per service) |
+| Forbidden log lines | A 403 caused by a wrong role is logged without the caller's `userSub`/`roles` (the role check rejects before the user is recorded) | order of checks in `services/common/auth.js` | record `req.user` before the role check, so investigations show who tried |
+| Training edits | Editing a training (PUT, creator only) keeps no change history | kept simple for the coursework | an audit table for training changes, like `audit_log` for certificates |
